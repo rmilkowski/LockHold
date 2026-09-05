@@ -15,6 +15,10 @@ export LOCKHOLD_DIST_DIR="$FIXTURE/dist"
 export LOCKHOLD_TEST_BINARY_DIR="$TEST_DIR/output with spaces"
 export LOCKHOLD_TEST_CALLS="$TEST_DIR/calls"
 export LOCKHOLD_TEST_FAIL="none"
+export LOCKHOLD_TEST_ALLOW_PROCESS=0
+export LOCKHOLD_TEST_PROCESS_STATE="$TEST_DIR/running"
+export LOCKHOLD_TEST_LAUNCHED="$TEST_DIR/launched"
+unset LOCKHOLD_INSTALL_DIR
 export PATH="$TEST_DIR/tools:$PATH"
 touch "$LOCKHOLD_TEST_CALLS"
 printf 'fixture executable\n' > "$LOCKHOLD_TEST_BINARY_DIR/LockHold"
@@ -26,6 +30,9 @@ cat > "$TEST_DIR/tools/swift" <<'STUB'
 set -euo pipefail
 printf 'swift\n' >> "$LOCKHOLD_TEST_CALLS"
 [[ "$1" == "build" && "$2" == "--package-path" && "$3" == "$LOCKHOLD_TEST_PACKAGE" ]]
+if [[ "$LOCKHOLD_TEST_ALLOW_PROCESS" == 1 ]]; then
+  [[ "$4" == "--configuration" && "$5" == "release" ]]
+fi
 if [[ "$LOCKHOLD_TEST_FAIL" == "build" ]]; then exit 42; fi
 if [[ " $* " == *" --show-bin-path "* ]]; then
   printf '%s\n' "$LOCKHOLD_TEST_BINARY_DIR"
@@ -35,15 +42,23 @@ cat > "$TEST_DIR/tools/codesign" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'codesign\n' >> "$LOCKHOLD_TEST_CALLS"
+if [[ -n "${LOCKHOLD_TEST_GATE:-}" && "$*" == "--verify --strict ${LOCKHOLD_INSTALL_DIR:-$LOCKHOLD_DIST_DIR}/LockHold.app" ]]; then
+  touch "$LOCKHOLD_TEST_GATE.ready"
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    if [[ -f "$LOCKHOLD_TEST_GATE.release" ]]; then break; fi
+    sleep 0.02
+  done
+  [[ -f "$LOCKHOLD_TEST_GATE.release" ]] || exit 98
+fi
 if [[ "$LOCKHOLD_TEST_FAIL" == "sign" ]]; then exit 43; fi
 if [[ "$LOCKHOLD_TEST_FAIL" == "final" || "$LOCKHOLD_TEST_FAIL" == "restore" ]]; then
-  if [[ "$*" == "--verify --strict $LOCKHOLD_DIST_DIR/LockHold.app" ]]; then exit 44; fi
+  if [[ "$*" == "--verify --strict ${LOCKHOLD_INSTALL_DIR:-$LOCKHOLD_DIST_DIR}/LockHold.app" ]]; then exit 44; fi
 fi
 STUB
 cat > "$TEST_DIR/tools/mv" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "$2" == "$LOCKHOLD_DIST_DIR/LockHold.app" ]]; then
+if [[ "$2" == "${LOCKHOLD_INSTALL_DIR:-$LOCKHOLD_DIST_DIR}/LockHold.app" ]]; then
   if [[ "$LOCKHOLD_TEST_FAIL" == "promote" && "$1" == */.lockhold-build.*/LockHold.app ]]; then
     exit 45
   fi
@@ -55,15 +70,33 @@ exec /bin/mv "$@"
 STUB
 cat > "$TEST_DIR/tools/pgrep" <<'STUB'
 #!/usr/bin/env bash
+set -euo pipefail
 printf 'pgrep\n' >> "$LOCKHOLD_TEST_CALLS"
-echo 'Unexpected process lookup in build-only mode' >&2
-exit 99
+if [[ "$LOCKHOLD_TEST_ALLOW_PROCESS" != 1 ]]; then
+  echo 'Unexpected process lookup in build-only mode' >&2
+  exit 99
+fi
+[[ -f "$LOCKHOLD_TEST_PROCESS_STATE" ]]
 STUB
 cat > "$TEST_DIR/tools/pkill" <<'STUB'
 #!/usr/bin/env bash
+set -euo pipefail
 printf 'pkill\n' >> "$LOCKHOLD_TEST_CALLS"
-echo 'Unexpected process termination in build-only mode' >&2
-exit 99
+if [[ "$LOCKHOLD_TEST_ALLOW_PROCESS" != 1 ]]; then
+  echo 'Unexpected process termination in build-only mode' >&2
+  exit 99
+fi
+rm -f "$LOCKHOLD_TEST_PROCESS_STATE"
+STUB
+cat > "$TEST_DIR/tools/open" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'open\n' >> "$LOCKHOLD_TEST_CALLS"
+[[ "$LOCKHOLD_TEST_ALLOW_PROCESS" == 1 ]]
+[[ "$*" == "-n $LOCKHOLD_INSTALL_DIR/LockHold.app" ]]
+if [[ "$LOCKHOLD_TEST_FAIL" == "open" ]]; then exit 47; fi
+printf '%s\n' "$2" > "$LOCKHOLD_TEST_LAUNCHED"
+touch "$LOCKHOLD_TEST_PROCESS_STATE"
 STUB
 chmod +x "$TEST_DIR/tools/"* "$FIXTURE/script/build_and_run.sh"
 
@@ -82,7 +115,7 @@ fi
 BUNDLE="$FIXTURE/dist/LockHold.app"
 
 assert_no_staging() {
-  if compgen -G "$FIXTURE/dist/.lockhold-build.*" > /dev/null; then
+  if compgen -G "${LOCKHOLD_INSTALL_DIR:-$LOCKHOLD_DIST_DIR}/.lockhold-build.*" > /dev/null; then
     echo 'Unexpected staging directory remains' >&2
     exit 1
   fi
@@ -141,5 +174,129 @@ export LOCKHOLD_TEST_FAIL=none
 [[ ! -e "$BUNDLE/keep" ]]
 cmp "$LOCKHOLD_TEST_BINARY_DIR/LockHold" "$BUNDLE/Contents/MacOS/LockHold"
 assert_no_staging
+
+# Install uses its own destination, a release build, and the verified bundle path.
+export LOCKHOLD_INSTALL_DIR="$TEST_DIR/Applications with spaces"
+export LOCKHOLD_TEST_ALLOW_PROCESS=1
+INSTALLED_APP="$LOCKHOLD_INSTALL_DIR/LockHold.app"
+touch "$BUNDLE/untouched-by-install"
+"$FIXTURE/script/build_and_run.sh" --install
+cmp "$LOCKHOLD_TEST_BINARY_DIR/LockHold" "$INSTALLED_APP/Contents/MacOS/LockHold"
+[[ "$(cat "$LOCKHOLD_TEST_LAUNCHED")" == "$INSTALLED_APP" ]]
+[[ -f "$BUNDLE/untouched-by-install" ]]
+assert_no_staging
+
+# Failed upgrades preserve the old installation and never launch the failed app.
+cp "$INSTALLED_APP/Contents/MacOS/LockHold" "$TEST_DIR/installed-binary"
+touch "$INSTALLED_APP/keep"
+printf 'upgraded executable\n' > "$LOCKHOLD_TEST_BINARY_DIR/LockHold"
+for failure in build sign promote final open; do
+  export LOCKHOLD_TEST_FAIL="$failure"
+  touch "$LOCKHOLD_TEST_PROCESS_STATE"
+  rm -f "$LOCKHOLD_TEST_LAUNCHED"
+  : > "$LOCKHOLD_TEST_CALLS"
+  if "$FIXTURE/script/build_and_run.sh" --install > /dev/null 2>&1; then
+    echo "Simulated install $failure failure unexpectedly succeeded" >&2
+    exit 1
+  fi
+  [[ -f "$INSTALLED_APP/keep" && ! -e "$LOCKHOLD_TEST_LAUNCHED" ]]
+  cmp "$TEST_DIR/installed-binary" "$INSTALLED_APP/Contents/MacOS/LockHold"
+  if [[ "$failure" == "build" || "$failure" == "sign" ]]; then
+    [[ -f "$LOCKHOLD_TEST_PROCESS_STATE" ]]
+  fi
+  assert_no_staging
+done
+
+# A valid upgrade stops the old process only after staged verification succeeds.
+export LOCKHOLD_TEST_FAIL=none
+touch "$LOCKHOLD_TEST_PROCESS_STATE"
+: > "$LOCKHOLD_TEST_CALLS"
+"$FIXTURE/script/build_and_run.sh" --install
+[[ ! -e "$INSTALLED_APP/keep" ]]
+cmp "$LOCKHOLD_TEST_BINARY_DIR/LockHold" "$INSTALLED_APP/Contents/MacOS/LockHold"
+[[ "$(cat "$LOCKHOLD_TEST_CALLS")" == $'swift\nswift\ncodesign\ncodesign\npgrep\npkill\npgrep\ncodesign\nopen' ]]
+assert_no_staging
+
+# Hold one transaction at final verification while a contender tries the same
+# destination. Check both successful publication and rollback before retrying.
+for mode in --build --install; do
+  if [[ "$mode" == --build ]]; then
+    unset LOCKHOLD_INSTALL_DIR
+    export LOCKHOLD_TEST_ALLOW_PROCESS=0
+    SHARED_APP="$BUNDLE"
+  else
+    export LOCKHOLD_INSTALL_DIR="$TEST_DIR/Applications with spaces"
+    export LOCKHOLD_TEST_ALLOW_PROCESS=1
+    SHARED_APP="$INSTALLED_APP"
+  fi
+  for outcome in none final; do
+    GATE="$TEST_DIR/concurrent-$mode-$outcome"
+    cp "$SHARED_APP/Contents/MacOS/LockHold" "$TEST_DIR/before-concurrent"
+    printf 'first concurrent build %s %s\n' "$mode" "$outcome" > "$LOCKHOLD_TEST_BINARY_DIR/LockHold"
+    LOCKHOLD_TEST_GATE="$GATE" LOCKHOLD_TEST_FAIL="$outcome" \
+      "$FIXTURE/script/build_and_run.sh" "$mode" > "$GATE.log" 2>&1 &
+    FIRST_PID=$!
+    for ((attempt = 0; attempt < 500; attempt++)); do
+      if [[ -f "$GATE.ready" ]]; then break; fi
+      sleep 0.02
+    done
+    if [[ ! -f "$GATE.ready" ]]; then
+      cat "$GATE.log" >&2
+      echo 'Concurrent build did not reach verification' >&2
+      wait "$FIRST_PID" || true
+      exit 1
+    fi
+
+    cp "$SHARED_APP/Contents/MacOS/LockHold" "$TEST_DIR/during-concurrent"
+    cp "$LOCKHOLD_TEST_CALLS" "$TEST_DIR/calls-before-contender"
+    printf 'contending build\n' > "$LOCKHOLD_TEST_BINARY_DIR/LockHold"
+    if "$FIXTURE/script/build_and_run.sh" "$mode" > "$GATE.contender.log" 2>&1; then
+      echo 'Concurrent replacement unexpectedly succeeded' >&2
+      touch "$GATE.release"
+      wait "$FIRST_PID" || true
+      exit 1
+    fi
+    [[ "$(cat "$GATE.contender.log")" == *'Cannot lock '* ]]
+    cmp "$TEST_DIR/calls-before-contender" "$LOCKHOLD_TEST_CALLS"
+    cmp "$TEST_DIR/during-concurrent" "$SHARED_APP/Contents/MacOS/LockHold"
+    [[ "$(cat "${SHARED_APP%/*}/.lockhold-build.lock/pid")" == "$FIRST_PID" ]]
+
+    touch "$GATE.release"
+    if [[ "$outcome" == none ]]; then
+      wait "$FIRST_PID"
+      cmp "$TEST_DIR/during-concurrent" "$SHARED_APP/Contents/MacOS/LockHold"
+    else
+      if wait "$FIRST_PID"; then
+        echo 'Concurrent verification failure unexpectedly succeeded' >&2
+        exit 1
+      else
+        [[ $? -eq 44 ]]
+      fi
+      cmp "$TEST_DIR/before-concurrent" "$SHARED_APP/Contents/MacOS/LockHold"
+    fi
+    assert_no_staging
+    "$FIXTURE/script/build_and_run.sh" "$mode" > /dev/null
+    cmp "$LOCKHOLD_TEST_BINARY_DIR/LockHold" "$SHARED_APP/Contents/MacOS/LockHold"
+    [[ ! -e "$SHARED_APP/LockHold.app" ]]
+    assert_no_staging
+  done
+done
+
+# Never overwrite an unrelated application or a symlink at the install path.
+/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier example.unrelated' "$INSTALLED_APP/Contents/Info.plist"
+: > "$LOCKHOLD_TEST_CALLS"
+if "$FIXTURE/script/build_and_run.sh" --install > /dev/null 2>&1; then
+  echo 'Unrelated app was unexpectedly replaced' >&2
+  exit 1
+fi
+[[ ! -s "$LOCKHOLD_TEST_CALLS" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INSTALLED_APP/Contents/Info.plist")" == example.unrelated ]]
+/bin/mv "$INSTALLED_APP" "$TEST_DIR/saved-app"
+ln -s "$TEST_DIR/saved-app" "$INSTALLED_APP"
+if "$FIXTURE/script/build_and_run.sh" --install > /dev/null 2>&1; then
+  echo 'Install symlink was unexpectedly replaced' >&2
+  exit 1
+fi
+[[ -L "$INSTALLED_APP" && ! -s "$LOCKHOLD_TEST_CALLS" ]]
 
 echo 'Build-script regression checks passed.'

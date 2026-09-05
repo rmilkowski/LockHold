@@ -2,7 +2,10 @@
 .swiftpm/
 dist/
 .DS_Store
-.codex/
+.codex/*
+!.codex/environments/
+.codex/environments/*
+!.codex/environments/environment.toml
 *.xcuserstate
 xcuserdata/
 .env

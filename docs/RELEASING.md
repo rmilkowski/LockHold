@@ -7,7 +7,8 @@ ID identity, enable a distribution workflow, or submit anything to Apple.
 ## Publishing the source repository
 
 1. Run `./script/check.sh` and review the exact files that will be committed.
-2. Keep `.build/`, `dist/`, `.codex/`, credentials, and signing files out of Git.
+2. Keep `.build/`, `dist/`, personal Codex settings, credentials, and signing files
+   out of Git. Only `.codex/environments/environment.toml` is shared from `.codex/`.
 3. After creating the GitHub repository, enable private vulnerability reporting.
 4. Let both CI jobs pass and consider requiring them in the default branch's ruleset.
 

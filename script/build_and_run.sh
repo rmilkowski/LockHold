@@ -8,6 +8,7 @@ Usage: build_and_run.sh [MODE] [--release] [-- SWIFT_BUILD_ARGUMENTS...]
 Modes (default: run):
   run                 Build the app bundle and launch it
   --build             Build the app bundle without stopping or launching the app
+  --install           Build a release app, install/upgrade it in Applications, and launch it
   --debug             Launch the rebuilt app under LLDB
   --logs              Launch and stream process logs
   --telemetry         Launch and stream LockHold's own logs
@@ -16,6 +17,7 @@ Modes (default: run):
 
 Pass --release for an optimised build; debug is the default.
 Set LOCKHOLD_DIST_DIR to an absolute path to build outside the checkout.
+Set LOCKHOLD_INSTALL_DIR to an absolute path to install somewhere other than /Applications.
 USAGE
 }
 
@@ -25,6 +27,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     run) MODE="run" ;;
     --build|build) MODE="build" ;;
+    --install|install) MODE="install" ;;
     --debug|debug) MODE="debug" ;;
     --logs|logs) MODE="logs" ;;
     --telemetry|telemetry) MODE="telemetry" ;;
@@ -45,13 +48,79 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="LockHold"
 DIST_DIR="${LOCKHOLD_DIST_DIR:-$ROOT_DIR/dist}"
+if [[ "$MODE" == "install" ]]; then
+  CONFIGURATION="release"
+  DIST_DIR="${LOCKHOLD_INSTALL_DIR:-/Applications}"
+fi
 if [[ "$DIST_DIR" != /* ]]; then
-  echo "LOCKHOLD_DIST_DIR must be an absolute path." >&2
+  echo "LOCKHOLD_DIST_DIR and LOCKHOLD_INSTALL_DIR must be absolute paths." >&2
   exit 2
 fi
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 INFO_PLIST="$ROOT_DIR/Assets/Info.plist"
 BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")"
+
+LOCK_DIR="$DIST_DIR/.lockhold-build.lock"
+LOCK_HELD=false
+STAGING_DIR=""
+PREVIOUS_APP=""
+INSTALLING=false
+HAD_PREVIOUS=false
+
+release_lock() {
+  if [[ "$LOCK_HELD" == true ]]; then
+    rm -f "$LOCK_DIR/pid" && rmdir "$LOCK_DIR" || return 1
+    LOCK_HELD=false
+  fi
+}
+
+cleanup() {
+  local result=$? retain_backup=false
+  trap - EXIT
+  if [[ "$INSTALLING" == true ]]; then
+    if [[ -e "$PREVIOUS_APP" || -L "$PREVIOUS_APP" ]]; then
+      if ! rm -rf "$APP_BUNDLE" || ! mv "$PREVIOUS_APP" "$APP_BUNDLE"; then
+        printf 'Could not restore the previous app. Backup retained at %s\n' "$PREVIOUS_APP" >&2
+        retain_backup=true
+        result=1
+      fi
+    elif [[ "$HAD_PREVIOUS" == false ]]; then
+      rm -rf "$APP_BUNDLE" || result=1
+    fi
+  fi
+  if [[ "$retain_backup" == false && -n "$STAGING_DIR" ]]; then
+    rm -rf "$STAGING_DIR" || result=1
+  fi
+  release_lock || result=1
+  exit "$result"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Hold one destination lock through inspection, building, replacement, and rollback.
+# A contender must never read or remove another invocation's temporary app state.
+mkdir -p "$DIST_DIR"
+if ! mkdir "$LOCK_DIR"; then
+  printf 'Cannot lock %s. If another build or install is running, wait for it to finish and retry.\n' "$DIST_DIR" >&2
+  printf 'If a previous build was forcibly killed, confirm it has ended before removing %s.\n' "$LOCK_DIR" >&2
+  exit 1
+fi
+LOCK_HELD=true
+printf '%s\n' "$$" > "$LOCK_DIR/pid"
+
+if [[ "$MODE" == "install" && ( -e "$APP_BUNDLE" || -L "$APP_BUNDLE" ) ]]; then
+  if [[ -L "$APP_BUNDLE" ]]; then
+    echo "Refusing to replace a symbolic link at $APP_BUNDLE." >&2
+    exit 1
+  fi
+  EXISTING_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_BUNDLE/Contents/Info.plist")"
+  if [[ "$EXISTING_BUNDLE_ID" != "$BUNDLE_ID" ]]; then
+    echo "Refusing to replace an app with a different bundle identifier at $APP_BUNDLE." >&2
+    exit 1
+  fi
+fi
 SWIFT_BUILD_ARGUMENTS=(--package-path "$ROOT_DIR" --configuration "$CONFIGURATION" "$@")
 
 # Keep generated caches local to the checkout, while honouring explicit overrides.
@@ -77,7 +146,7 @@ stop_app() {
   exit 1
 }
 
-if [[ "$MODE" != "build" ]]; then
+if [[ "$MODE" != "build" && "$MODE" != "install" ]]; then
   stop_app
 fi
 
@@ -85,33 +154,9 @@ swift build "${SWIFT_BUILD_ARGUMENTS[@]}" --product "$APP_NAME"
 BUILD_BINARY="$(swift build "${SWIFT_BUILD_ARGUMENTS[@]}" --show-bin-path)/$APP_NAME"
 
 # Assemble and validate a replacement before removing the previous bundle.
-mkdir -p "$DIST_DIR"
 STAGING_DIR="$(mktemp -d "$DIST_DIR/.lockhold-build.XXXXXX")"
 STAGED_APP="$STAGING_DIR/$APP_NAME.app"
 PREVIOUS_APP="$STAGING_DIR/Previous.app"
-INSTALLING=false
-HAD_PREVIOUS=false
-
-cleanup() {
-  local result=$?
-  trap - EXIT
-  if [[ "$INSTALLING" == true ]]; then
-    if [[ -e "$PREVIOUS_APP" || -L "$PREVIOUS_APP" ]]; then
-      if ! rm -rf "$APP_BUNDLE" || ! mv "$PREVIOUS_APP" "$APP_BUNDLE"; then
-        printf 'Could not restore the previous app. Backup retained at %s\n' "$PREVIOUS_APP" >&2
-        exit 1
-      fi
-    elif [[ "$HAD_PREVIOUS" == false ]]; then
-      rm -rf "$APP_BUNDLE" || exit 1
-    fi
-  fi
-  rm -rf "$STAGING_DIR" || exit 1
-  exit "$result"
-}
-
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp -X "$BUILD_BINARY" "$STAGED_APP/Contents/MacOS/$APP_NAME"
@@ -125,6 +170,11 @@ plutil -lint "$STAGED_APP/Contents/Info.plist"
 codesign --force --sign - "$STAGED_APP"
 codesign --verify --strict "$STAGED_APP"
 
+if [[ "$MODE" == "install" ]]; then
+  # Keep the installed app running until its replacement is ready.
+  stop_app
+fi
+
 if [[ -e "$APP_BUNDLE" || -L "$APP_BUNDLE" ]]; then
   HAD_PREVIOUS=true
 fi
@@ -134,17 +184,24 @@ if [[ "$HAD_PREVIOUS" == true ]]; then
 fi
 mv "$STAGED_APP" "$APP_BUNDLE"
 codesign --verify --strict "$APP_BUNDLE"
+if [[ "$MODE" == "install" ]]; then
+  open -n "$APP_BUNDLE"
+fi
 INSTALLING=false
 rm -rf "$STAGING_DIR"
+release_lock
 trap - EXIT INT TERM
 printf 'Built %s (%s)\n' "$APP_BUNDLE" "$CONFIGURATION"
+if [[ "$MODE" == "install" ]]; then
+  printf 'Installed and launched %s\n' "$APP_BUNDLE"
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
 case "$MODE" in
-  build) ;;
+  build|install) ;;
   run) open_app ;;
   debug) lldb -- "$APP_BUNDLE/Contents/MacOS/$APP_NAME" ;;
   logs)

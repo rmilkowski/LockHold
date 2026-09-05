@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add shared Codex Run, Build, and Install/Upgrade actions, with release installation and rollback.
+- Isolate Codex build caches by checkout and prevent concurrent replacement of the same app bundle.
 - Restore the previous app bundle when replacement or final signature verification fails.
 
 ## 0.1.1 - 2026-09-05
