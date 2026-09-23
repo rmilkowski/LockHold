@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-09-23
+
+- Stop repeated sleep-helper status queries during menu and appearance updates.
+- Cache helper status between lifecycle refreshes while checking current status for sleep changes, approval, and removal.
+- Avoid redundant status-bar icon updates and refresh helper status after failed operations.
+
+## 0.2.0 - 2026-09-23
+
 - Add independent System Sleep control through an optional SMAppService root helper.
 - Preserve Auto-Lock labels and behaviour; show persistent system sleep state separately.
 - Show adjacent lock and laptop indicators, independently red when each override is active, with one shared menu.

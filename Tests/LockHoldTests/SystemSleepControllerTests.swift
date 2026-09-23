@@ -5,6 +5,44 @@ import Testing
 
 @MainActor
 struct SystemSleepControllerTests {
+    @Test func helperStatusIsCachedBetweenLifecycleRefreshes() async {
+        let client = FakeSleepClient()
+        let manager = FakeSleepManager(status: .enabled)
+        var instant = ContinuousClock().now
+        let controller = SystemSleepController(
+            reader: client, writer: client, helper: manager, now: { instant })
+
+        #expect(manager.statusReads == 0)
+        await controller.refresh()
+        #expect(controller.helperStatus == .enabled)
+        #expect(manager.statusReads == 1)
+
+        manager.status = .requiresApproval
+        for _ in 0..<10 { #expect(controller.helperStatus == .enabled) }
+        await controller.refresh()
+        #expect(manager.statusReads == 1)
+
+        instant = instant.advanced(by: .seconds(1))
+        await controller.refresh()
+        #expect(controller.helperStatus == .requiresApproval)
+        #expect(manager.statusReads == 2)
+    }
+
+    @Test func changingSleepChecksCurrentHelperStatusDespiteCachedDisplay() async {
+        let client = FakeSleepClient()
+        let manager = FakeSleepManager(status: .enabled)
+        let controller = SystemSleepController(reader: client, writer: client, helper: manager)
+        await controller.refresh()
+        manager.status = .notRegistered
+
+        await controller.setSleepDisabled(true)
+
+        #expect(manager.registerCalls == 1)
+        #expect(controller.helperStatus == .requiresApproval)
+        #expect(controller.isAwaitingApproval)
+        #expect(await client.writes.isEmpty)
+    }
+
     @Test(arguments: [false, true])
     func alreadyApprovedHelperChangesSettingWithoutRegistering(desired: Bool) async {
         let client = FakeSleepClient(disabled: !desired)
@@ -26,9 +64,14 @@ struct SystemSleepControllerTests {
         #expect(manager.settingsOpened)
         #expect(await client.writes.isEmpty)
         manager.status = .enabled
+        let readsBeforeApproval = manager.statusReads
         await controller.resumeAfterApproval()
+        #expect(manager.statusReads == readsBeforeApproval + 1)
+        let readsAfterApproval = manager.statusReads
         await controller.resumeAfterApproval()
         #expect(controller.sleepDisabled == desired)
+        #expect(controller.helperStatus == .enabled)
+        #expect(manager.statusReads == readsAfterApproval)
         #expect(!controller.isAwaitingApproval)
         #expect(await client.writes == [desired])
     }
@@ -40,8 +83,45 @@ struct SystemSleepControllerTests {
         await controller.setSleepDisabled(true)
         controller.cancelPendingRequest()
         manager.status = .enabled
+        let readsBeforeResume = manager.statusReads
         await controller.resumeAfterApproval()
+        #expect(manager.statusReads == readsBeforeResume)
         #expect(await client.writes.isEmpty)
+    }
+
+    @Test func pendingApprovalReadsStatusOncePerPoll() async {
+        let client = FakeSleepClient()
+        let manager = FakeSleepManager(status: .notRegistered)
+        let controller = SystemSleepController(reader: client, writer: client, helper: manager)
+        await controller.setSleepDisabled(true)
+        let readsBeforePolling = manager.statusReads
+
+        await controller.resumeAfterApproval()
+        await controller.resumeAfterApproval()
+
+        #expect(manager.statusReads == readsBeforePolling + 2)
+        #expect(controller.isAwaitingApproval)
+        #expect(controller.helperStatus == .requiresApproval)
+    }
+
+    @Test func failedWriteAfterApprovalRefreshesCachedHelperStatus() async {
+        let client = FakeSleepClient(failWrites: true)
+        let manager = FakeSleepManager(status: .notRegistered)
+        let controller = SystemSleepController(reader: client, writer: client, helper: manager)
+        await controller.setSleepDisabled(true)
+        #expect(controller.isAwaitingApproval)
+
+        manager.status = .enabled
+        controller.onChange = {
+            if controller.isBusy && !controller.isAwaitingApproval {
+                manager.status = .notRegistered
+            }
+        }
+        await controller.resumeAfterApproval()
+
+        #expect(controller.helperStatus == .notRegistered)
+        #expect(controller.errorMessage != nil)
+        #expect(!controller.isAwaitingApproval)
     }
 
     @Test func readsTerminalChangesAndDoesNotResetOnLaunch() async {
@@ -74,10 +154,40 @@ struct SystemSleepControllerTests {
         let client = FakeSleepClient(disabled: true)
         let manager = FakeSleepManager(status: .enabled)
         let controller = SystemSleepController(reader: client, writer: client, helper: manager)
+        await controller.refresh()
+        #expect(controller.helperStatus == .enabled)
         await controller.removeHelper()
         #expect(await client.writes == [false])
         #expect(manager.unregisterCalls == 1)
         #expect(controller.sleepDisabled == false)
+        #expect(controller.helperStatus == .notRegistered)
+    }
+
+    @Test func registrationFailureRefreshesCachedStatus() async {
+        let client = FakeSleepClient()
+        let manager = FakeSleepManager(status: .notRegistered)
+        manager.registerErrorStatus = .requiresApproval
+        let controller = SystemSleepController(reader: client, writer: client, helper: manager)
+
+        await controller.setSleepDisabled(true)
+
+        #expect(controller.helperStatus == .requiresApproval)
+        #expect(controller.errorMessage != nil)
+        #expect(await client.writes.isEmpty)
+    }
+
+    @Test func unregistrationFailureRefreshesCachedStatus() async {
+        let client = FakeSleepClient()
+        let manager = FakeSleepManager(status: .enabled)
+        manager.unregisterErrorStatus = .requiresApproval
+        let controller = SystemSleepController(reader: client, writer: client, helper: manager)
+        await controller.refresh()
+        #expect(controller.helperStatus == .enabled)
+
+        await controller.removeHelper()
+
+        #expect(controller.helperStatus == .requiresApproval)
+        #expect(controller.errorMessage != nil)
     }
 
     @Test func failedRestoreKeepsHelperAvailableForRecovery() async {
@@ -166,13 +276,31 @@ private actor FakeSleepClient: SleepSettingReading, SleepSettingWriting {
 
 @MainActor
 private final class FakeSleepManager: SleepHelperManaging {
-    var status: SleepHelperStatus
+    private var currentStatus: SleepHelperStatus
+    var status: SleepHelperStatus {
+        get {
+            statusReads += 1
+            return currentStatus
+        }
+        set { currentStatus = newValue }
+    }
+    var statusReads = 0
     var registerCalls = 0
     var unregisterCalls = 0
     var settingsOpened = false
+    var registerErrorStatus: SleepHelperStatus?
+    var unregisterErrorStatus: SleepHelperStatus?
 
-    init(status: SleepHelperStatus) { self.status = status }
-    func register() throws { registerCalls += 1; status = .requiresApproval }
-    func unregister() async throws { unregisterCalls += 1; status = .notRegistered }
+    init(status: SleepHelperStatus) { currentStatus = status }
+    func register() throws {
+        registerCalls += 1
+        status = registerErrorStatus ?? .requiresApproval
+        if registerErrorStatus != nil { throw SleepControlError("Simulated registration failure") }
+    }
+    func unregister() async throws {
+        unregisterCalls += 1
+        status = unregisterErrorStatus ?? .notRegistered
+        if unregisterErrorStatus != nil { throw SleepControlError("Simulated removal failure") }
+    }
     func openSettings() { settingsOpened = true }
 }

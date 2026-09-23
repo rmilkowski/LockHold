@@ -6,31 +6,50 @@ final class SystemSleepController {
     private let reader: any SleepSettingReading
     private let writer: any SleepSettingWriting
     private let helper: any SleepHelperManaging
+    private let now: @MainActor () -> ContinuousClock.Instant
     private var pendingValue: Bool?
     private var isReading = false
     private var revision = 0
+    private var lastHelperStatusRead: ContinuousClock.Instant?
 
     private(set) var sleepDisabled: Bool?
+    private(set) var helperStatus: SleepHelperStatus = .notRegistered
     private(set) var isBusy = false
     private(set) var errorMessage: String?
     var onChange: (() -> Void)?
 
     var isAwaitingApproval: Bool { pendingValue != nil }
-    var helperStatus: SleepHelperStatus { helper.status }
+
+    @discardableResult
+    private func readHelperStatus(force: Bool = true) -> SleepHelperStatus {
+        let currentTime = now()
+        if !force, let lastHelperStatusRead,
+            lastHelperStatusRead.duration(to: currentTime) < .seconds(1)
+        {
+            return helperStatus
+        }
+        let status = helper.status
+        helperStatus = status
+        lastHelperStatusRead = currentTime
+        return status
+    }
 
     init(
         reader: any SleepSettingReading = LocalSleepSettingReader(),
         writer: any SleepSettingWriting = SleepHelperClient(),
-        helper: any SleepHelperManaging = SleepHelperManager()
+        helper: any SleepHelperManaging = SleepHelperManager(),
+        now: @escaping @MainActor () -> ContinuousClock.Instant = { ContinuousClock().now }
     ) {
         self.reader = reader
         self.writer = writer
         self.helper = helper
+        self.now = now
     }
 
     func refresh() async {
         guard !isBusy, !isReading else { return }
         isReading = true
+        readHelperStatus(force: false)
         let readRevision = revision
         defer { isReading = false; onChange?() }
         do {
@@ -53,9 +72,9 @@ final class SystemSleepController {
             let current = try await reader.readSleepDisabled()
             sleepDisabled = current
             guard current != desired else { return }
-            if helper.status != .enabled {
+            if readHelperStatus() != .enabled {
                 try helper.register()
-                if helper.status != .enabled {
+                if readHelperStatus() != .enabled {
                     pendingValue = desired
                     helper.openSettings()
                     return
@@ -63,13 +82,15 @@ final class SystemSleepController {
             }
             sleepDisabled = try await writer.setSleepDisabled(desired)
         } catch {
+            readHelperStatus()
             errorMessage = error.localizedDescription
             sleepDisabled = try? await reader.readSleepDisabled()
         }
     }
 
     func resumeAfterApproval() async {
-        guard let desired = pendingValue, helper.status == .enabled, !isBusy else { return }
+        guard let desired = pendingValue, !isBusy else { return }
+        guard readHelperStatus() == .enabled else { return }
         revision += 1
         pendingValue = nil
         isBusy = true
@@ -82,6 +103,7 @@ final class SystemSleepController {
                 sleepDisabled = try await writer.setSleepDisabled(desired)
             }
         } catch {
+            readHelperStatus()
             errorMessage = error.localizedDescription
             sleepDisabled = try? await reader.readSleepDisabled()
         }
@@ -116,7 +138,9 @@ final class SystemSleepController {
                 sleepDisabled = try await writer.setSleepDisabled(false)
             }
             try await helper.unregister()
+            readHelperStatus()
         } catch {
+            readHelperStatus()
             errorMessage = error.localizedDescription
             sleepDisabled = try? await reader.readSleepDisabled()
         }

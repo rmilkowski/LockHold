@@ -20,6 +20,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var approvalTask: Task<Void, Never>?
     private var activationObserver: NSObjectProtocol?
     private var appearanceObservation: NSKeyValueObservation?
+    private var renderedIconState: IconState?
+
+    private struct IconState: Equatable {
+        let overrideIsActive: Bool
+        let sleepDisabled: Bool
+        let appearanceName: String
+    }
 
     init(assertionController: AutoLockAssertionController) {
         self.assertionController = assertionController
@@ -66,7 +73,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         button.imageScaling = .scaleProportionallyDown
         // Mixed red/template-style indicators need a fresh image when the bar changes theme.
         appearanceObservation = button.observe(\.effectiveAppearance) { [weak self] _, _ in
-            Task { @MainActor [weak self] in self?.refreshState() }
+            Task { @MainActor [weak self] in self?.refreshIcon() }
         }
     }
 
@@ -114,10 +121,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         toggleItem.title = overrideIsActive ? "Enable Auto-Lock" : "Disable Auto-Lock"
         let sleepDisabled = sleepController.sleepDisabled == true
-        statusItem.button?.image = StatusIcon.image(
-            overrideIsActive: overrideIsActive, systemSleepDisabled: sleepDisabled
-        )
-        statusItem.button?.contentTintColor = nil
+        refreshIcon()
         let status =
             overrideIsActive ? "Auto-lock override active" : "Auto-lock follows macOS settings"
         let sleepStatus: String
@@ -133,18 +137,35 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         sleepItem.title = sleepDisabled ? "Enable System Sleep" : "Disable System Sleep"
         sleepItem.representedObject = !sleepDisabled
-        if sleepController.helperStatus != .enabled { sleepItem.title += "…" }
+        let helperStatus = sleepController.helperStatus
+        if helperStatus != .enabled { sleepItem.title += "…" }
         sleepItem.isEnabled = !sleepController.isBusy && !sleepController.isAwaitingApproval
         sleepStatusItem.title = sleepStatus
         sleepStatusItem.toolTip =
             "This system setting persists after quitting LockHold and restarting your Mac."
-        helperSettingsItem.isHidden = sleepController.helperStatus == .notRegistered
+        helperSettingsItem.isHidden = helperStatus == .notRegistered
         cancelSetupItem.isHidden = !sleepController.isAwaitingApproval
-        removeHelperItem.isHidden = sleepController.helperStatus == .notRegistered
+        removeHelperItem.isHidden = helperStatus == .notRegistered
         removeHelperItem.isEnabled = !sleepController.isBusy
         statusItem.button?.toolTip = "LockHold: \(status); \(sleepStatus)"
         statusItem.button?.setAccessibilityLabel("LockHold: \(status); \(sleepStatus)")
         updateApprovalPolling()
+    }
+
+    private func refreshIcon() {
+        guard let button = statusItem.button else { return }
+        let state = IconState(
+            overrideIsActive: assertionController.isPreventingAutoLock,
+            sleepDisabled: sleepController.sleepDisabled == true,
+            appearanceName: button.effectiveAppearance.name.rawValue
+        )
+        guard renderedIconState != state else { return }
+        // Store the key before assigning the image; that assignment can trigger appearance KVO.
+        renderedIconState = state
+        button.image = StatusIcon.image(
+            overrideIsActive: state.overrideIsActive, systemSleepDisabled: state.sleepDisabled
+        )
+        button.contentTintColor = nil
     }
 
     func menuWillOpen(_ menu: NSMenu) {
