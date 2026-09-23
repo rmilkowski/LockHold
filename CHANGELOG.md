@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add independent System Sleep control through an optional SMAppService root helper.
+- Preserve Auto-Lock labels and behaviour; show persistent system sleep state separately.
+- Show adjacent lock and laptop indicators, independently red when each override is active, with one shared menu.
+- Resume the requested sleep change after initial approval, verify pmset results, and support helper removal.
+- Validate both XPC peers by signing team and identifier, and restrict helper requests to the active console user.
+- Package and sign the helper with the app, with ad-hoc builds retaining Auto-Lock only.
+- Preserve the selected sleep action when another app changes the setting before it runs.
+- Keep LLDB debugging available through a separate app signing variant that cannot access the root helper.
+- Stop idle helpers after rejected connections so app upgrades can start the current helper.
+
 - Add shared Codex Run, Build, and Install/Upgrade actions, with release installation and rollback.
 - Isolate Codex build caches by checkout and prevent concurrent replacement of the same app bundle.
 - Restore the previous app bundle when replacement or final signature verification fails.

@@ -8,6 +8,8 @@ FIXTURE="$TEST_DIR/project with spaces"
 mkdir -p "$FIXTURE/script" "$FIXTURE/Assets" "$TEST_DIR/tools" "$TEST_DIR/output with spaces"
 cp "$ROOT_DIR/script/build_and_run.sh" "$FIXTURE/script/"
 cp "$ROOT_DIR/Assets/Info.plist" "$ROOT_DIR/Assets/LockHold.icns" "$FIXTURE/Assets/"
+cp "$ROOT_DIR/Assets/dev.codex.LockHold.SleepHelper.plist" "$FIXTURE/Assets/"
+cp "$ROOT_DIR/Assets/Debug.entitlements" "$FIXTURE/Assets/"
 cp "$ROOT_DIR/LICENSE" "$FIXTURE/"
 
 export LOCKHOLD_TEST_PACKAGE="$FIXTURE"
@@ -19,9 +21,11 @@ export LOCKHOLD_TEST_ALLOW_PROCESS=0
 export LOCKHOLD_TEST_PROCESS_STATE="$TEST_DIR/running"
 export LOCKHOLD_TEST_LAUNCHED="$TEST_DIR/launched"
 unset LOCKHOLD_INSTALL_DIR
+export LOCKHOLD_SIGN_IDENTITY=-
 export PATH="$TEST_DIR/tools:$PATH"
 touch "$LOCKHOLD_TEST_CALLS"
 printf 'fixture executable\n' > "$LOCKHOLD_TEST_BINARY_DIR/LockHold"
+printf 'fixture helper\n' > "$LOCKHOLD_TEST_BINARY_DIR/LockHoldSleepHelper"
 
 # Run the real packaging script with build/sign/process stubs and controlled
 # move failures. No real app is launched, stopped, or signed here.
@@ -31,7 +35,7 @@ set -euo pipefail
 printf 'swift\n' >> "$LOCKHOLD_TEST_CALLS"
 [[ "$1" == "build" && "$2" == "--package-path" && "$3" == "$LOCKHOLD_TEST_PACKAGE" ]]
 if [[ "$LOCKHOLD_TEST_ALLOW_PROCESS" == 1 ]]; then
-  [[ "$4" == "--configuration" && "$5" == "release" ]]
+  [[ "$4" == "--configuration" && "$5" == "${LOCKHOLD_TEST_CONFIGURATION:-release}" ]]
 fi
 if [[ "$LOCKHOLD_TEST_FAIL" == "build" ]]; then exit 42; fi
 if [[ " $* " == *" --show-bin-path "* ]]; then
@@ -42,6 +46,22 @@ cat > "$TEST_DIR/tools/codesign" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'codesign\n' >> "$LOCKHOLD_TEST_CALLS"
+if [[ "$1" == "--force" ]]; then
+  [[ " $* " == *' --options runtime '* ]]
+  if [[ "${!#}" == */Contents/MacOS/LockHoldSleepHelper ]]; then
+    [[ " $* " != *' --entitlements '* ]]
+  elif [[ "${!#}" == */LockHold.app ]]; then
+    if [[ "${LOCKHOLD_TEST_DEBUG_SIGNING:-0}" == 1 ]]; then
+      [[ " $* " == *" --entitlements $LOCKHOLD_TEST_PACKAGE/Assets/Debug.entitlements "* ]]
+      [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$LOCKHOLD_TEST_PACKAGE/Assets/Debug.entitlements")" == true ]]
+    else
+      [[ " $* " != *' --entitlements '* ]]
+    fi
+  else
+    echo 'Unexpected signing target' >&2
+    exit 99
+  fi
+fi
 if [[ -n "${LOCKHOLD_TEST_GATE:-}" && "$*" == "--verify --strict ${LOCKHOLD_INSTALL_DIR:-$LOCKHOLD_DIST_DIR}/LockHold.app" ]]; then
   touch "$LOCKHOLD_TEST_GATE.ready"
   for ((attempt = 0; attempt < 500; attempt++)); do
@@ -98,6 +118,13 @@ if [[ "$LOCKHOLD_TEST_FAIL" == "open" ]]; then exit 47; fi
 printf '%s\n' "$2" > "$LOCKHOLD_TEST_LAUNCHED"
 touch "$LOCKHOLD_TEST_PROCESS_STATE"
 STUB
+cat > "$TEST_DIR/tools/lldb" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'lldb\n' >> "$LOCKHOLD_TEST_CALLS"
+[[ "${LOCKHOLD_TEST_DEBUG_SIGNING:-0}" == 1 ]]
+[[ "$*" == "-- $LOCKHOLD_DIST_DIR/LockHold.app/Contents/MacOS/LockHold" ]]
+STUB
 chmod +x "$TEST_DIR/tools/"* "$FIXTURE/script/build_and_run.sh"
 
 # Reproduce invocation by absolute path from outside the package directory.
@@ -138,8 +165,24 @@ export LOCKHOLD_TEST_FAIL=none
 cmp "$LOCKHOLD_TEST_BINARY_DIR/LockHold" "$BUNDLE/Contents/MacOS/LockHold"
 cmp "$FIXTURE/Assets/Info.plist" "$BUNDLE/Contents/Info.plist"
 cmp "$FIXTURE/LICENSE" "$BUNDLE/Contents/Resources/LICENSE"
+cmp "$LOCKHOLD_TEST_BINARY_DIR/LockHoldSleepHelper" "$BUNDLE/Contents/MacOS/LockHoldSleepHelper"
+cmp "$FIXTURE/Assets/dev.codex.LockHold.SleepHelper.plist" "$BUNDLE/Contents/Library/LaunchDaemons/dev.codex.LockHold.SleepHelper.plist"
 [[ -x "$BUNDLE/Contents/MacOS/LockHold" ]]
-[[ $(wc -l < "$LOCKHOLD_TEST_CALLS") -eq 5 ]]
+[[ -x "$BUNDLE/Contents/MacOS/LockHoldSleepHelper" ]]
+[[ $(wc -l < "$LOCKHOLD_TEST_CALLS") -eq 7 ]]
+
+# LLDB gets its entitlement only on the app, including when debugging optimised code.
+# Ordinary builds above and installs below must never receive that entitlement.
+for configuration in debug release; do
+  DEBUG_ARGUMENTS=(--debug)
+  if [[ "$configuration" == release ]]; then DEBUG_ARGUMENTS+=(--release); fi
+  touch "$LOCKHOLD_TEST_PROCESS_STATE"
+  : > "$LOCKHOLD_TEST_CALLS"
+  LOCKHOLD_TEST_ALLOW_PROCESS=1 LOCKHOLD_TEST_CONFIGURATION="$configuration" LOCKHOLD_TEST_DEBUG_SIGNING=1 \
+    "$FIXTURE/script/build_and_run.sh" "${DEBUG_ARGUMENTS[@]}"
+  [[ "$(cat "$LOCKHOLD_TEST_CALLS")" == $'pgrep\npkill\npgrep\nswift\nswift\ncodesign\ncodesign\ncodesign\ncodesign\ncodesign\nlldb' ]]
+  assert_no_staging
+done
 
 printf 'keep the existing bundle\n' > "$BUNDLE/keep"
 cp "$BUNDLE/Contents/MacOS/LockHold" "$TEST_DIR/previous-binary"
@@ -214,7 +257,7 @@ touch "$LOCKHOLD_TEST_PROCESS_STATE"
 "$FIXTURE/script/build_and_run.sh" --install
 [[ ! -e "$INSTALLED_APP/keep" ]]
 cmp "$LOCKHOLD_TEST_BINARY_DIR/LockHold" "$INSTALLED_APP/Contents/MacOS/LockHold"
-[[ "$(cat "$LOCKHOLD_TEST_CALLS")" == $'swift\nswift\ncodesign\ncodesign\npgrep\npkill\npgrep\ncodesign\nopen' ]]
+[[ "$(cat "$LOCKHOLD_TEST_CALLS")" == $'swift\nswift\ncodesign\ncodesign\ncodesign\ncodesign\npgrep\npkill\npgrep\ncodesign\nopen' ]]
 assert_no_staging
 
 # Hold one transaction at final verification while a contender tries the same

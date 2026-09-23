@@ -24,4 +24,6 @@ for script_file in "${SHELL_FILES[@]}"; do
 done
 shellcheck --severity=style "${SHELL_FILES[@]}"
 plutil -lint "$ROOT_DIR/Assets/Info.plist"
+plutil -lint "$ROOT_DIR/Assets/Debug.entitlements"
+plutil -lint "$ROOT_DIR/Assets/dev.codex.LockHold.SleepHelper.plist"
 echo "Lint passed."

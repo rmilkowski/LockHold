@@ -1,8 +1,10 @@
 # Release preparation
 
 Publishing this source repository and distributing a trusted macOS app are separate
-steps. The build script creates a local ad-hoc signature; it does not use a Developer
-ID identity, enable a distribution workflow, or submit anything to Apple.
+steps. The build script selects a single available signing identity or accepts
+`LOCKHOLD_SIGN_IDENTITY`; with no identity it creates an ad-hoc build with only the
+Auto-Lock feature available. It does not submit anything to Apple. An Apple Development
+identity supports local helper testing; it is not a notarised public distribution.
 
 ## Publishing the source repository
 
@@ -25,6 +27,10 @@ templates, and monthly Dependabot checks for its pinned GitHub Actions dependenc
    the selected toolchain's target architecture. Validate Apple Silicon and Intel
    artifacts separately, or establish and verify a universal-binary build.
 4. Test the menu, idle behaviour, manual locking, and exit cleanup on supported Macs.
+   Also test helper approval, authenticated XPC rejection, persistence, removal,
+   and upgrades. Keep the app identifier and signing team stable across releases
+   to preserve the helper's trust relationship. Sign nested helper code before the
+   enclosing app; both must use the same identity and hardened runtime.
 5. For downloads intended for other users, set up Developer ID signing, hardened
    runtime, and Apple's notarisation process. Verify the final distributed artifact,
    including its signature and stapled notarisation ticket, on a clean Mac.

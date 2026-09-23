@@ -21,30 +21,46 @@ struct StatusIconTests {
         #expect(image.size.height > 0)
     }
 
-    @Test(arguments: [false, true])
-    func activeIconRendersRed(inDarkAppearance: Bool) throws {
+    @Test(arguments: [false, true], [(false, false), (true, false), (false, true), (true, true)])
+    func indicatorsRenderIndependently(inDarkAppearance: Bool, overrides: (Bool, Bool)) throws {
         let appearance = try #require(
             NSAppearance(named: inDarkAppearance ? .darkAqua : .aqua)
         )
         var renderedImage: Data?
         appearance.performAsCurrentDrawingAppearance {
-            renderedImage = StatusIcon.image(overrideIsActive: true).tiffRepresentation
+            renderedImage =
+                StatusIcon.image(
+                    overrideIsActive: overrides.0, systemSleepDisabled: overrides.1
+                ).tiffRepresentation
         }
 
         let data = try #require(renderedImage)
         let bitmap = try #require(NSBitmapImageRep(data: data))
-        let containsRed = (0..<bitmap.pixelsWide).contains { x in
-            (0..<bitmap.pixelsHigh).contains { y in
-                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
-                    return false
+        let midpoint = bitmap.pixelsWide / 2
+        for (columns, isActive) in [
+            (0..<midpoint, overrides.0), (midpoint..<bitmap.pixelsWide, overrides.1),
+        ] {
+            var containsRed = false
+            var containsContrastingInk = false
+            for x in columns {
+                for y in 0..<bitmap.pixelsHigh {
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                        color.alphaComponent > 0.5
+                    else { continue }
+                    containsRed =
+                        containsRed
+                        || (color.redComponent > 0.7
+                            && color.greenComponent < color.redComponent * 0.7
+                            && color.blueComponent < color.redComponent * 0.7)
+                    let brightness =
+                        (color.redComponent + color.greenComponent + color.blueComponent) / 3
+                    containsContrastingInk =
+                        containsContrastingInk
+                        || (inDarkAppearance ? brightness > 0.6 : brightness < 0.4)
                 }
-                return color.alphaComponent > 0.5
-                    && color.redComponent > 0.7
-                    && color.greenComponent < color.redComponent * 0.7
-                    && color.blueComponent < color.redComponent * 0.7
             }
+            #expect(containsRed == isActive)
+            if !isActive { #expect(containsContrastingInk) }
         }
-
-        #expect(containsRed)
     }
 }

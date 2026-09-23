@@ -10,19 +10,56 @@ network connections, analytics, or third-party runtime dependencies.
 
 ## Usage
 
-Click the lock icon in the menu bar:
+Click either of the adjacent lock and laptop icons in the menu bar to open the shared menu:
 
 | Action | Behaviour |
 | --- | --- |
-| **Disable Auto-Lock** | Keep the display awake. The icon becomes a red crossed-out lock. |
+| **Disable Auto-Lock** | Keep the display awake. The lock icon becomes a red crossed-out lock. |
 | **Enable Auto-Lock** | Release LockHold's override and return control to macOS. |
-| **Exit** | Quit the app and release its override. |
+| **Disable System Sleep** | Prevent system sleep, including closing the lid, using an optional approved helper. The laptop icon becomes red. |
+| **Enable System Sleep** | Restore normal system sleep behaviour. |
+| **Exit** | Quit the app and release the Auto-Lock override; preserve the system sleep setting. |
 
-The app starts with the override off. The choice is temporary and is not saved
-between launches. LockHold does not change your stored power or password settings
-and does not start automatically at login.
+The Auto-Lock override starts off and is temporary. It does not change your stored
+power or password settings. LockHold does not start automatically at login.
 
-### What it prevents
+### Optional system sleep control
+
+Install a signed build in Applications, then choose **Disable System Sleep**.
+On first use, LockHold registers its bundled sleep helper and opens System Settings
+so an administrator can approve it under Login Items & Extensions. Once approved,
+the requested change resumes automatically. Subsequent toggles use that approval
+without requesting an administrator password each time. You can cancel the pending
+change from LockHold's menu while approval is outstanding.
+
+This is independent of Auto-Lock. The helper runs Apple's `/usr/bin/pmset -a disablesleep 1`
+or `0`, then reads the setting back to verify it. The setting is system-wide and
+**persists after quitting LockHold and restarting your Mac**, until you turn it off.
+The menu reads macOS's actual value, including changes made in Terminal; launching
+LockHold never resets an existing setting. The lock and laptop indicators turn red
+independently when their respective overrides are active. Both are red when both
+overrides are active; inactive indicators follow the menu bar's normal appearance.
+The pair stays together as one menu bar item and opens the same menu from either icon.
+
+Keeping a closed MacBook running consumes power and can generate heat; leave it
+ventilated. This feature does not change password or screen-lock preferences.
+`disablesleep` is an undocumented pmset option, so lid behaviour needs checking on
+the MacBook model and macOS version in use. It is not a guarantee against battery,
+thermal, or other system-enforced shutdowns.
+
+**Sleep Helper Settings…** opens macOS's approval controls. **Remove Sleep Helper…**
+first restores normal system sleep and then unregisters the helper. If restoration
+fails, LockHold keeps the helper registered so you can retry. Remove it before
+deleting the app. Simply quitting or disabling the background item in System Settings
+does not undo the persistent sleep setting.
+
+The helper accepts only the fixed read/toggle operations, validates the client's
+Apple signing team and exact app identifier, and checks that the requesting user
+is the active console user. The app also verifies the helper's signature and root
+identity. The helper exits when idle; macOS starts it on demand. No PAM or sudoers
+changes are needed.
+
+### What the Auto-Lock option prevents
 
 LockHold holds an IOKit
 [`PreventUserIdleDisplaySleep` assertion](https://developer.apple.com/documentation/iokit/kiopmassertiontypepreventuseridledisplaysleep).
@@ -58,8 +95,14 @@ To build an optimised app without launching it or stopping a running instance:
 ./script/build_and_run.sh --build --release
 ```
 
-You can copy the resulting app into Applications. These are local, ad-hoc-signed
-builds for the build machine's architecture, not notarised public downloads.
+You can copy the resulting app into Applications. The script uses the single valid
+code-signing identity available on the Mac, or falls back to ad-hoc signing if none
+is available. Set `LOCKHOLD_SIGN_IDENTITY` to choose an identity when there are several,
+or to `-` to explicitly build ad-hoc. Ad-hoc builds support Auto-Lock but cannot enable
+the privileged sleep helper. Apple Development signing supports local helper testing;
+Developer ID signing and notarisation are needed for public distribution.
+
+These are builds for the build machine's architecture, not notarised public downloads.
 See [release preparation](docs/RELEASING.md) before distributing binaries.
 
 If your checkout is inside iCloud Drive or another synced folder, its file provider
@@ -97,7 +140,8 @@ The installed app keeps running until the new bundle has been built and verified
 The installer then stops your running LockHold instances and replaces the app,
 restoring the previous bundle if replacement, verification, or launch fails. If
 restoration also fails, it prints the retained backup location. A successful
-launch starts with the override off. Version numbers come from `Assets/Info.plist`;
+launch starts with the Auto-Lock override off and reads the existing system sleep setting.
+Version numbers come from `Assets/Info.plist`;
 installing does not automatically increment them.
 
 The destination must be writable by your account. Set `LOCKHOLD_INSTALL_DIR` to
@@ -122,9 +166,15 @@ removing the stale lock directory and retrying.
 | `./script/build_and_run.sh --telemetry` | Rebuild, launch, and stream LockHold's local diagnostic logs. |
 | `./script/build_and_run.sh --help` | Show all options. |
 
+`--debug` gives the app the debugging entitlement required by LLDB. The privileged
+helper rejects debugger-enabled clients, so System Sleep control is unavailable in
+that variant, even if the helper is already approved. Normal builds and installations
+do not receive this entitlement; use `--install` to return to the full app.
+
 Launch modes stop the current user's running LockHold processes before rebuilding;
 `--install` waits until the replacement is ready, and `--build` leaves them running.
-Stopping LockHold releases any active override; the new instance starts with it off.
+Stopping LockHold releases its Auto-Lock override; the new instance starts with it off.
+The separate system sleep setting is preserved.
 Build or signing failures leave the previous app bundle intact.
 
 ## Lint and tests
@@ -138,8 +188,8 @@ brew install shellcheck
 
 This runs Swift's bundled `swift-format` linter in strict mode, ShellCheck,
 shell syntax and bundle-metadata checks, Swift tests with compiler warnings treated
-as errors, and build-script regression checks. Tests use a fake IOKit client and
-do not change the Mac's sleep state.
+as errors, and build-script regression checks. Tests use fake IOKit and pmset clients
+and do not change the Mac's sleep state.
 
 ```sh
 ./script/lint.sh        # Check Swift and shell code
