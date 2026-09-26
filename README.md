@@ -76,8 +76,9 @@ disabled system lock setting or cancel assertions held by other apps.
 Requirements:
 
 - macOS 14 Sonoma or later, on Apple Silicon or Intel.
-- Xcode 16 or later, with its command-line tools selected (`xcode-select -p`).
-- Swift 6 or later. CI uses Xcode 16.4 to keep formatting consistent.
+- Xcode 27 or later, with its command-line tools selected (`xcode-select -p`).
+- Swift 6.4 or later. CI uses Xcode 27.0 on GitHub's `xcode-27` Apple Silicon
+  runner (public preview); Intel is not currently tested in CI.
 
 Download or clone this repository, then run from its root:
 

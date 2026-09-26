@@ -14,15 +14,11 @@ concurrency:
 
 jobs:
   check:
-    name: Check (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, macos-15-intel]
-    runs-on: ${{ matrix.os }}
+    name: Check (Xcode 27, Apple Silicon)
+    runs-on: xcode-27
     timeout-minutes: 15
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -32,6 +28,7 @@ jobs:
         run: brew install shellcheck
       - name: Show tool versions
         run: |
+          xcodebuild -version
           swift --version
           swift format --version
           shellcheck --version
